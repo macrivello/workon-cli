@@ -4,7 +4,9 @@ import type {
   ClickUpFolder,
   ClickUpList,
   ClickUpCustomField,
-  ClickUpSearchResult
+  ClickUpSearchResult,
+  ClickUpComment,
+  ClickUpSubtask,
 } from '../types.js';
 import { isDryRun, dryRunLog } from '../utils/dry-run.js';
 
@@ -95,6 +97,16 @@ export class ClickUpClient {
   }
 
   /**
+   * Get the valid statuses for a list
+   */
+  async getListStatuses(listId: string): Promise<string[]> {
+    const data = await this.request<{ statuses: Array<{ status: string }> }>(
+      `/list/${listId}`
+    );
+    return data.statuses.map(s => s.status);
+  }
+
+  /**
    * Get custom fields available on a list
    */
   async getListCustomFields(listId: string): Promise<ClickUpCustomField[]> {
@@ -129,7 +141,7 @@ export class ClickUpClient {
         name: task.name,
         description: task.markdown_description || '',
         text_content: task.markdown_description || '',
-        status: { status: task.status || 'Open', type: 'open', orderindex: 0, color: '#000000' },
+        status: { status: task.status || 'Open', color: '#000000' },
         url: 'https://app.clickup.com/t/dry-run-task-id (dry-run)',
         assignees: [],
       } as ClickUpTask;
@@ -145,7 +157,7 @@ export class ClickUpClient {
    */
   async getMyTasks(userId: string, limit = 20): Promise<ClickUpTask[]> {
     const params = new URLSearchParams({
-      assignees: userId,
+      'assignees[]': userId,
       include_closed: 'false',
       subtasks: 'true',
       page: '0',
@@ -159,16 +171,62 @@ export class ClickUpClient {
   }
 
   /**
+   * Get comments for a task
+   */
+  async getTaskComments(taskId: string): Promise<ClickUpComment[]> {
+    const data = await this.request<{ comments: ClickUpComment[] }>(
+      `/task/${taskId}/comment`
+    );
+    return data.comments;
+  }
+
+  /**
+   * Get subtasks for a task
+   */
+  async getTaskSubtasks(taskId: string): Promise<ClickUpSubtask[]> {
+    const params = new URLSearchParams({
+      parent: taskId,
+      include_closed: 'true',
+    });
+    const data = await this.request<{ tasks: ClickUpSubtask[] }>(
+      `/team/${this.workspaceId}/task?${params}`
+    );
+    return data.tasks;
+  }
+
+  /**
+   * Fetch multiple tasks by ID in parallel (full task data with descriptions).
+   */
+  async getTasksFull(taskIds: string[]): Promise<ClickUpTask[]> {
+    return Promise.all(taskIds.map(id => this.getTask(id)));
+  }
+
+  /**
+   * Update an existing task
+   */
+  async updateTask(taskId: string, updates: { name?: string; markdown_description?: string; status?: string }): Promise<ClickUpTask> {
+    if (isDryRun()) {
+      dryRunLog('clickup', `Would update task ${taskId}`, updates);
+      return this.getTask(taskId);
+    }
+    return this.request<ClickUpTask>(`/task/${taskId}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  /**
    * Add a comment to a task
    */
   async commentOnTask(taskId: string, comment: string): Promise<void> {
+    const tagged = `${comment}\n\n_via workon-cli_`;
     if (isDryRun()) {
-      dryRunLog('clickup', `Would comment on task ${taskId}`, { comment });
+      dryRunLog('clickup', `Would comment on task ${taskId}`, { comment: tagged });
       return;
     }
     await this.request(`/task/${taskId}/comment`, {
       method: 'POST',
-      body: JSON.stringify({ comment_text: comment }),
+      body: JSON.stringify({ comment_text: tagged }),
     });
   }
 }

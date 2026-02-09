@@ -4,10 +4,11 @@ import { join } from 'path';
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { extractTicketIdFromBranch } from '../utils/branch.js';
-import { createSpinner } from '../utils/ui.js';
+import { createSpinner, showSuccess, showWarning } from '../utils/ui.js';
 import { createClickUpClient } from '../services/clickup.js';
 import { readStdin, isStdinPiped } from '../utils/stdin.js';
 import { updatePrSections, type PrSections } from '../utils/template.js';
+import { resolveStatus, PR_PATTERNS } from '../utils/ticket-status.js';
 import * as git from '../services/git.js';
 import * as github from '../services/github.js';
 
@@ -242,9 +243,40 @@ ${testing}
 
     spinner5.succeed(`Created PR #${pr.number}`);
     console.log(`\n  ${chalk.blue(pr.url)}`);
+
+    await updateTicketForPr(config, branch, pr.number, pr.url);
   } catch (error) {
     spinner5.fail('Failed to create PR');
     console.error(chalk.red(error));
+  }
+}
+
+/**
+ * Update ClickUp ticket after PR creation: set status to "in review" and comment with PR link.
+ */
+async function updateTicketForPr(
+  config: ReturnType<typeof loadConfig>,
+  branch: string,
+  prNumber: number,
+  prUrl: string,
+): Promise<void> {
+  const ticketId = extractTicketIdFromBranch(branch);
+  if (!ticketId) return;
+
+  try {
+    const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
+    const task = await clickup.getTask(ticketId);
+
+    const status = await resolveStatus(clickup, task, config.clickup.defaults.statusOnPr, PR_PATTERNS);
+    if (status && task.status.status.toLowerCase() !== status.toLowerCase()) {
+      await clickup.updateTask(ticketId, { status });
+      showSuccess(`Ticket status → ${status.toUpperCase()}`);
+    }
+
+    await clickup.commentOnTask(ticketId, `PR #${prNumber} opened: ${prUrl}`);
+    showSuccess('Commented on ticket');
+  } catch (error) {
+    showWarning(`Failed to update ticket: ${error}`);
   }
 }
 
@@ -414,6 +446,8 @@ async function createPrNonInteractive(
 
     createSpinnerInstance.succeed(`Created PR #${pr.number}`);
     console.log(`\n  ${chalk.blue(pr.url)}`);
+
+    await updateTicketForPr(config, branch, pr.number, pr.url);
   } catch (error) {
     createSpinnerInstance.fail('Failed to create PR');
     console.error(chalk.red(error));

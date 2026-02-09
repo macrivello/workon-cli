@@ -21,6 +21,10 @@ const ConfigSchema = z.object({
       status: z.string().default('ON DECK'),
       type: z.string().optional(),
       domain: z.string().optional(),
+      statusOnStart: z.string().optional(),
+      statusOnPr: z.string().optional(),
+      statusOnMergeRequest: z.string().optional(),
+      statusOnMerge: z.string().optional(),
     }),
   }),
   github: z.object({
@@ -33,6 +37,11 @@ const ConfigSchema = z.object({
     enabled: z.boolean().default(true),
     generateTicketDescriptions: z.boolean().default(true),
   }).default({}),
+  editor: z.string().optional(),
+  repos: z.record(z.object({
+    path: z.string(),
+    merge: z.enum(['mergebot', 'squash', 'merge']).default('mergebot'),
+  })).optional(),
   circleci: z.object({
     apiToken: z.string().min(1),
   }).optional(),
@@ -50,7 +59,14 @@ export function loadConfig(): Config {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     const parsed = JSON.parse(raw);
     migrateConfig(parsed);
-    return ConfigSchema.parse(parsed);
+    const config = ConfigSchema.parse(parsed);
+
+    // Set VISUAL env var so @inquirer/editor uses the configured editor
+    if (config.editor) {
+      process.env.VISUAL = config.editor;
+    }
+
+    return config;
   } catch (error) {
     if (error instanceof z.ZodError) {
       console.error(chalk.red('Invalid configuration:'));
