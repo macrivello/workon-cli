@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import { isDryRun, dryRunLog } from '../utils/dry-run.js';
 import { isValidBranchName } from '../utils/branch.js';
+import type { WorktreeEntry } from '../types.js';
 
 /**
  * Execute a git command safely with array arguments
@@ -224,4 +225,117 @@ export function unpushedCommitCount(): number {
     // No upstream, so all commits since base would be pushed
     return commitCount();
   }
+}
+
+/**
+ * Create a linked worktree with a new branch from the base branch
+ */
+export function worktreeAdd(worktreePath: string, branch: string): void {
+  if (!isValidBranchName(branch)) {
+    throw new Error(`Invalid branch name: ${branch}`);
+  }
+  if (isDryRun()) {
+    dryRunLog('git', `Would create worktree at ${worktreePath} with branch ${branch}`);
+    return;
+  }
+  const baseBranch = getDefaultBaseBranch();
+  try {
+    gitSpawn(['worktree', 'add', worktreePath, '-b', branch, baseBranch]);
+  } catch {
+    // Branch may already exist — try adding worktree with existing branch
+    gitSpawn(['worktree', 'add', worktreePath, branch]);
+  }
+}
+
+/**
+ * Check if a worktree has uncommitted changes
+ */
+export function worktreeHasChanges(worktreePath: string): boolean {
+  try {
+    const result = spawnSync('git', ['-C', worktreePath, 'status', '--porcelain'], { encoding: 'utf-8' });
+    return (result.stdout || '').trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove a linked worktree. Uses --force to handle unclean state.
+ */
+export function worktreeRemove(worktreePath: string): void {
+  if (isDryRun()) {
+    dryRunLog('git', `Would remove worktree at ${worktreePath}`);
+    return;
+  }
+  gitSpawn(['worktree', 'remove', worktreePath, '--force']);
+}
+
+/**
+ * List all worktrees, parsed from porcelain output
+ */
+export function worktreeList(): WorktreeEntry[] {
+  const output = gitSpawn(['worktree', 'list', '--porcelain']);
+  const entries: WorktreeEntry[] = [];
+  let current: Partial<WorktreeEntry> = {};
+
+  for (const line of output.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      current = { path: line.slice('worktree '.length) };
+    } else if (line.startsWith('HEAD ')) {
+      current.head = line.slice('HEAD '.length);
+    } else if (line.startsWith('branch ')) {
+      // branch refs/heads/foo → foo
+      current.branch = line.slice('branch '.length).replace('refs/heads/', '');
+    } else if (line === 'bare') {
+      current.bare = true;
+    } else if (line === 'detached') {
+      current.branch = null;
+    } else if (line === '' && current.path) {
+      entries.push({
+        path: current.path,
+        head: current.head || '',
+        branch: current.branch ?? null,
+        bare: current.bare || false,
+      });
+      current = {};
+    }
+  }
+
+  // Handle last entry if no trailing blank line
+  if (current.path) {
+    entries.push({
+      path: current.path,
+      head: current.head || '',
+      branch: current.branch ?? null,
+      bare: current.bare || false,
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Detect if cwd is inside a linked (non-main) worktree
+ */
+export function isWorktree(): boolean {
+  try {
+    const entries = worktreeList();
+    if (entries.length < 2) return false;
+    const cwd = repoRoot();
+    const main = entries[0].path;
+    return cwd !== main;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get path to the main (primary) worktree
+ */
+export function mainWorktreePath(): string {
+  const entries = worktreeList();
+  if (entries.length === 0) {
+    throw new Error('No worktrees found');
+  }
+  return entries[0].path;
 }

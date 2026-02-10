@@ -4,6 +4,7 @@ import { createClickUpClient } from '../services/clickup.js';
 import { extractTicketIdFromBranch } from '../utils/branch.js';
 import * as git from '../services/git.js';
 import * as github from '../services/github.js';
+import { readAllStatuses } from '../utils/worktree-status.js';
 
 export interface ContextCommandOptions {
   json?: boolean;
@@ -34,6 +35,15 @@ interface WorkflowContext {
     approvals: string[];
     changesRequested: string[];
   } | null;
+  worktrees: Array<{
+    ticketId: string | null;
+    ticketName: string | null;
+    stage: string;
+    branch: string | null;
+    prUrl: string | null;
+    blockedReason: string | null;
+    path: string;
+  }>;
   recommendedAction: string;
 }
 
@@ -55,6 +65,7 @@ export async function contextCommand(options: ContextCommandOptions = {}): Promi
       aheadOfBase: isBase ? 0 : git.commitCount(),
     },
     pr: null,
+    worktrees: [],
     recommendedAction: '',
   };
 
@@ -108,6 +119,22 @@ export async function contextCommand(options: ContextCommandOptions = {}): Promi
     }
   }
 
+  // Gather worktree data
+  try {
+    const allInfo = readAllStatuses();
+    context.worktrees = allInfo.filter(w => !w.isMain).map(w => ({
+      ticketId: w.ticketId,
+      ticketName: w.status?.ticketName || null,
+      stage: w.status?.stage || 'unknown',
+      branch: w.branch,
+      prUrl: w.status?.prUrl || null,
+      blockedReason: w.status?.blockedReason || null,
+      path: w.path,
+    }));
+  } catch {
+    // Not in a worktree-capable repo — continue without
+  }
+
   // Determine recommended action
   context.recommendedAction = determineNextAction(context);
 
@@ -121,8 +148,14 @@ export async function contextCommand(options: ContextCommandOptions = {}): Promi
 }
 
 function determineNextAction(ctx: WorkflowContext): string {
+  // Check for blocked worktrees regardless of current branch state
+  const blockedWorktrees = ctx.worktrees.filter(w => w.stage === 'blocked');
+  const blockedSuffix = blockedWorktrees.length > 0
+    ? ` (${blockedWorktrees.length} background worktree${blockedWorktrees.length > 1 ? 's' : ''} blocked — run \`workon worktree list\`)`
+    : '';
+
   if (ctx.git.isBaseBranch) {
-    return 'Pick a task: run `workon tasks` or `workon next`';
+    return 'Pick a task: run `workon tasks` or `workon next`' + blockedSuffix;
   }
 
   // Check if the PR was already merged — branch needs cleanup
@@ -165,7 +198,7 @@ function determineNextAction(ctx: WorkflowContext): string {
     return 'Ready to merge: run `workon merge`';
   }
 
-  return 'Check PR status: run `workon pr-status`';
+  return 'Check PR status: run `workon pr-status`' + blockedSuffix;
 }
 
 function renderContext(ctx: WorkflowContext): void {
@@ -220,6 +253,24 @@ function renderContext(ctx: WorkflowContext): void {
     }
 
     console.log(`  ${chalk.blue(ctx.pr.url)}`);
+  }
+
+  // Background worktrees
+  if (ctx.worktrees.length > 0) {
+    console.log('');
+    console.log(chalk.bold('Background Work'));
+    for (const wt of ctx.worktrees) {
+      const id = wt.ticketId || 'unknown';
+      const stageColor = wt.stage === 'blocked' ? chalk.red
+        : wt.stage === 'completed' ? chalk.green
+        : wt.stage === 'ready-to-merge' ? chalk.green
+        : chalk.cyan;
+      const stage = stageColor(`[${wt.stage}]`);
+      const name = wt.ticketName || '';
+      const pr = wt.prUrl ? `  | ${chalk.blue(wt.prUrl)}` : '';
+      const blocked = wt.blockedReason ? `  ${chalk.red(wt.blockedReason)}` : '';
+      console.log(`  ${id}  ${stage}  ${name}${pr}${blocked}`);
+    }
   }
 
   // Next action

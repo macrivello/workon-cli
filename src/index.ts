@@ -23,6 +23,18 @@ import { nextCommand } from './commands/next.js';
 import { ticketCreateCommand, type TicketCreateOptions } from './commands/ticket-create.js';
 import { validateCommand, type ValidateCommandOptions } from './commands/validate.js';
 import { agentCommand, type AgentCommandOptions } from './commands/agent.js';
+import {
+  worktreeAddCommand,
+  worktreeListCommand,
+  worktreeRemoveCommand,
+  worktreeStatusCommand,
+  worktreeUpdateStatusCommand,
+  type WorktreeAddOptions,
+  type WorktreeListOptions,
+  type WorktreeRemoveOptions,
+  type WorktreeStatusOptions,
+  type WorktreeUpdateStatusOptions,
+} from './commands/worktree.js';
 import { withGracefulExit } from './utils/exit.js';
 import { setDryRun } from './utils/dry-run.js';
 
@@ -40,9 +52,13 @@ program
   .argument('[ticket-id]', 'Optional ticket ID to start from')
   .option('-y, --yes', 'Skip confirmation prompts (accepts safe defaults)')
   .option('--cwd <path>', 'Run in a different directory (for multi-repo workflows)')
+  .option('--worktree', 'Create a worktree instead of checking out a branch')
   .option('--dry-run', 'Show what would be done without executing')
-  .action(withGracefulExit((ticketId: string | undefined, opts: { yes?: boolean; cwd?: string; dryRun?: boolean }) => {
+  .action(withGracefulExit((ticketId: string | undefined, opts: { yes?: boolean; cwd?: string; worktree?: boolean; dryRun?: boolean }) => {
     if (opts.dryRun) setDryRun(true);
+    if (opts.worktree && ticketId) {
+      return worktreeAddCommand(ticketId, { yes: opts.yes });
+    }
     return startCommand(ticketId, { yes: opts.yes, cwd: opts.cwd });
   }));
 
@@ -277,7 +293,9 @@ program
   .option('--comment', 'Post missing requirements as a comment on the ticket')
   .option('--deep', 'Run AI-powered semantic analysis')
   .option('--hierarchy', 'Cross-validate parent/subtask hierarchy (coverage, contracts, ordering)')
-  .action(withGracefulExit((ticketId: string | undefined, options: ValidateCommandOptions) => {
+  .option('--dry-run', 'Show what would be done without executing')
+  .action(withGracefulExit((ticketId: string | undefined, options: ValidateCommandOptions & { dryRun?: boolean }) => {
+    if (options.dryRun) setDryRun(true);
     return validateCommand(ticketId, options).then(() => {});
   }));
 
@@ -289,6 +307,61 @@ program
   .option('--status <statuses...>', 'Statuses to watch (default: "on deck" "ready for eng" "open" "to do")')
   .action(withGracefulExit((options: AgentCommandOptions) => {
     return agentCommand(options);
+  }));
+
+const worktree = program
+  .command('worktree')
+  .description('Manage git worktrees for background development');
+
+worktree
+  .command('add')
+  .description('Create a worktree for background agent work on a ticket')
+  .argument('<ticket-id>', 'ClickUp ticket ID')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .option('--dry-run', 'Show what would be done without executing')
+  .action(withGracefulExit((ticketId: string, opts: WorktreeAddOptions & { dryRun?: boolean }) => {
+    if (opts.dryRun) setDryRun(true);
+    return worktreeAddCommand(ticketId, { yes: opts.yes });
+  }));
+
+worktree
+  .command('list')
+  .description('List all worktrees with pipeline status')
+  .option('--json', 'Output as JSON')
+  .action(withGracefulExit(async (opts: WorktreeListOptions) => {
+    worktreeListCommand(opts);
+  }));
+
+worktree
+  .command('remove')
+  .description('Remove a worktree and its branch')
+  .argument('<ticket-id>', 'ClickUp ticket ID')
+  .option('-y, --yes', 'Skip confirmation')
+  .option('--keep', 'Keep the branch after removing worktree')
+  .option('--dry-run', 'Show what would be done without executing')
+  .action(withGracefulExit((ticketId: string, opts: WorktreeRemoveOptions & { dryRun?: boolean }) => {
+    if (opts.dryRun) setDryRun(true);
+    return worktreeRemoveCommand(ticketId, opts);
+  }));
+
+worktree
+  .command('status')
+  .description('Show detailed status of one or all worktrees')
+  .argument('[ticket-id]', 'ClickUp ticket ID (omit for all)')
+  .option('--json', 'Output as JSON')
+  .action(withGracefulExit(async (ticketId: string | undefined, opts: WorktreeStatusOptions) => {
+    worktreeStatusCommand(ticketId, opts);
+  }));
+
+worktree
+  .command('update-status')
+  .description('Update pipeline stage for current worktree (used by background agents)')
+  .option('--stage <stage>', 'Pipeline stage')
+  .option('--blocked <reason>', 'Reason for blocked state')
+  .option('--pr-url <url>', 'PR URL')
+  .option('--pr-number <n>', 'PR number')
+  .action(withGracefulExit(async (opts: WorktreeUpdateStatusOptions) => {
+    worktreeUpdateStatusCommand(opts);
   }));
 
 // Default command: treat argument as ticket ID (shortcut for `workon start <id>`)
