@@ -287,6 +287,8 @@ export function requestReviewers(prNumber: number, reviewers: string[]): void {
   ghSpawnRaw(['pr', 'edit', String(prNumber), '--add-reviewer', reviewers.join(',')]);
 }
 
+const VALID_BRANCH_NAME = /^[a-zA-Z0-9\/_\-\.]+$/;
+
 /**
  * Push current branch to origin
  */
@@ -297,6 +299,10 @@ export function pushBranch(): void {
 
   if (currentBranch === 'main' || currentBranch === 'master') {
     throw new Error(`Safety check: refusing to push ${currentBranch} branch`);
+  }
+
+  if (!VALID_BRANCH_NAME.test(currentBranch)) {
+    throw new Error(`Invalid branch name: ${currentBranch}`);
   }
 
   if (isDryRun()) {

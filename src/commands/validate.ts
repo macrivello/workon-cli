@@ -209,6 +209,21 @@ async function runHierarchyValidation(tree: HierarchyTree, silent = false): Prom
   }
 }
 
+/** Max length for recommendation text posted to ClickUp comments */
+const MAX_RECOMMENDATION_LENGTH = 5000;
+
+/**
+ * Sanitize text for safe inclusion in ClickUp comments:
+ * strip HTML tags, then truncate to max length.
+ */
+function sanitizeForComment(text: string): string {
+  const stripped = text.replace(/<[^>]*>/g, '');
+  if (stripped.length > MAX_RECOMMENDATION_LENGTH) {
+    return stripped.slice(0, MAX_RECOMMENDATION_LENGTH) + '... (truncated)';
+  }
+  return stripped;
+}
+
 export function parseSemanticFindings(raw: string): SemanticFinding[] {
   // Strip markdown code fences if present
   let cleaned = raw.trim();
@@ -221,12 +236,12 @@ export function parseSemanticFindings(raw: string): SemanticFinding[] {
   try {
     parsed = JSON.parse(cleaned);
   } catch {
-    // Fallback: return a single finding with the raw text
+    // Fallback: return a single finding with the raw text (sanitized)
     return [{
       category: 'clarity',
       severity: 'suggestion',
       message: 'AI analysis returned non-structured feedback',
-      recommendation: raw.trim(),
+      recommendation: sanitizeForComment(raw.trim()),
     }];
   }
 
@@ -250,7 +265,7 @@ export function parseSemanticFindings(raw: string): SemanticFinding[] {
         category: validCategories.has(item.category as string) ? item.category as SemanticFinding['category'] : 'clarity',
         severity: validSeverities.has(item.severity as string) ? item.severity as SemanticFinding['severity'] : 'suggestion',
         message: String(item.message),
-        recommendation: String(item.recommendation),
+        recommendation: sanitizeForComment(String(item.recommendation)),
       };
       if (typeof item.ticketId === 'string') finding.ticketId = item.ticketId;
       if (typeof item.ticketName === 'string') finding.ticketName = item.ticketName;
@@ -474,8 +489,12 @@ async function postValidationComments(
 
   // Post main comment on this ticket
   if (commentLines.length > 0) {
-    await clickup.commentOnTask(ticketId, commentLines.join('\n'));
-    showSuccess('Posted requirements comment on ticket');
+    try {
+      await clickup.commentOnTask(ticketId, commentLines.join('\n'));
+      showSuccess('Posted requirements comment on ticket');
+    } catch (error) {
+      console.error(`Failed to post validation comment on ${ticketId}:`, error instanceof Error ? error.message : error);
+    }
   }
 
   // Post hierarchy findings — summary on parent, targeted on individual subtasks
@@ -502,8 +521,12 @@ async function postValidationComments(
       summaryLines.push(`${icon} **[${f.category}]** ${f.message}${target}`);
       summaryLines.push(`   _→ ${f.recommendation}_`);
     }
-    await clickup.commentOnTask(ticketId, summaryLines.join('\n'));
-    showSuccess('Posted hierarchy analysis on parent ticket');
+    try {
+      await clickup.commentOnTask(ticketId, summaryLines.join('\n'));
+      showSuccess('Posted hierarchy analysis on parent ticket');
+    } catch (error) {
+      console.error(`Failed to post hierarchy comment on ${ticketId}:`, error instanceof Error ? error.message : error);
+    }
 
     // Post targeted comments on individual subtasks
     for (const [subId, findings] of byTicket) {
@@ -513,8 +536,12 @@ async function postValidationComments(
         subLines.push(`${icon} **[${f.category}]** ${f.message}`);
         subLines.push(`   _→ ${f.recommendation}_`);
       }
-      await clickup.commentOnTask(subId, subLines.join('\n'));
-      showSuccess(`Posted hierarchy findings on subtask ${subId}`);
+      try {
+        await clickup.commentOnTask(subId, subLines.join('\n'));
+        showSuccess(`Posted hierarchy findings on subtask ${subId}`);
+      } catch (error) {
+        console.error(`Failed to post hierarchy comment on subtask ${subId}:`, error instanceof Error ? error.message : error);
+      }
     }
   }
 }

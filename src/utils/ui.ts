@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { spawn } from 'child_process';
 import { dirname } from 'path';
 import { createInterface } from 'readline';
+import { parse } from 'shell-quote';
 
 export function createSpinner(text: string): Ora {
   return ora({ text, color: 'cyan' });
@@ -47,7 +48,7 @@ export async function editExternally(content: string, filePath: string): Promise
   // Try to open in configured editor (non-blocking)
   const editorCmd = process.env.VISUAL || process.env.EDITOR;
   if (editorCmd) {
-    const parts = editorCmd.split(/\s+/);
+    const parts = parse(editorCmd).filter((p): p is string => typeof p === 'string');
     const cmd = parts[0];
     // Filter out --wait since we handle waiting ourselves
     const args = [...parts.slice(1).filter(a => a !== '--wait'), filePath];

@@ -76,8 +76,8 @@ export async function prCommand(options: PrCommandOptions = {}): Promise<void> {
       const { prStatusCommand } = await import('./pr-status.js');
       await prStatusCommand(String(existingPr.number));
     } else if (action === 'open') {
-      const { execSync } = await import('child_process');
-      execSync(`open "${existingPr.url}"`, { stdio: 'inherit' });
+      const { spawn } = await import('child_process');
+      spawn('open', [existingPr.url], { stdio: 'inherit' });
     }
     return;
   }

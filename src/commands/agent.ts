@@ -1,4 +1,6 @@
 import chalk from 'chalk';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
 import { loadConfig } from '../utils/config.js';
 import { createClickUpClient } from '../services/clickup.js';
 import * as github from '../services/github.js';
@@ -26,6 +28,38 @@ const DEFAULT_INTERVAL_SECONDS = 300; // 5 minutes
 // Statuses that indicate a task is ready for an agent to pick up
 const DEFAULT_READY_STATUSES = ['on deck', 'ready for eng', 'open', 'to do'];
 
+const AGENT_STATE_PATH = join(process.env.HOME || '.', '.workon', 'agent-state.json');
+
+interface AgentState {
+  processedTasks: string[];
+  processedPrReviews: string[];
+}
+
+function loadAgentState(): { processedTasks: Set<string>; processedPrReviews: Set<string> } {
+  try {
+    if (existsSync(AGENT_STATE_PATH)) {
+      const raw = readFileSync(AGENT_STATE_PATH, 'utf-8');
+      const state: AgentState = JSON.parse(raw);
+      return {
+        processedTasks: new Set(state.processedTasks ?? []),
+        processedPrReviews: new Set(state.processedPrReviews ?? []),
+      };
+    }
+  } catch {
+    // Corrupted state file — start fresh
+  }
+  return { processedTasks: new Set(), processedPrReviews: new Set() };
+}
+
+function saveAgentState(processedTasks: Set<string>, processedPrReviews: Set<string>): void {
+  const state: AgentState = {
+    processedTasks: [...processedTasks],
+    processedPrReviews: [...processedPrReviews],
+  };
+  mkdirSync(dirname(AGENT_STATE_PATH), { recursive: true });
+  writeFileSync(AGENT_STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+}
+
 export async function agentCommand(options: AgentCommandOptions = {}): Promise<void> {
   const config = loadConfig();
   const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
@@ -46,18 +80,19 @@ export async function agentCommand(options: AgentCommandOptions = {}): Promise<v
   }
   console.log('');
 
-  // Track tasks we've already processed to avoid duplicate comments
-  const processedTasks = new Set<string>();
-  const processedPrReviews = new Set<string>();
+  // Load previously processed IDs from disk to survive restarts
+  const { processedTasks, processedPrReviews } = loadAgentState();
 
   if (options.once) {
     await pollOnce(config, clickup, readyStatuses, processedTasks, processedPrReviews);
+    saveAgentState(processedTasks, processedPrReviews);
     return;
   }
 
   // Continuous polling loop
   while (true) {
     await pollOnce(config, clickup, readyStatuses, processedTasks, processedPrReviews);
+    saveAgentState(processedTasks, processedPrReviews);
 
     console.log(chalk.dim(`\nNext poll in ${intervalSeconds}s... (Ctrl+C to stop)\n`));
     await sleep(intervalSeconds * 1000);
