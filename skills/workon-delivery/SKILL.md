@@ -7,6 +7,8 @@ allowed-tools: Bash(workon:*), Bash(gh:*), Bash(git:*), Read, Grep, Glob
 
 # Workon Delivery
 
+> **Note**: workon-flow and workon-delivery are companion skills. Flow handles ticket discovery through implementation; Delivery handles the PR lifecycle through merge. They hand off to each other at defined boundaries.
+
 Orchestrate the full PR lifecycle: create PRs, monitor CI, handle review feedback, merge with per-repo strategy, and cleanup.
 
 ## Current Workflow State
@@ -36,7 +38,14 @@ Orchestrate the full PR lifecycle: create PRs, monitor CI, handle review feedbac
 | `workon ci-failure [job-number]` | Get detailed CI failure output |
 | `workon merge --yes` | Merge PR (uses per-repo strategy from config) |
 | `workon cleanup --yes` | Switch to base branch, pull, delete feature branch |
-| `workon context` | Show current workflow state |
+
+## Error Handling
+
+When a CLI command fails:
+- **Network/API errors**: retry once, then report to user
+- **Invalid ticket ID or permissions**: report to user immediately
+- **CLI not found or config missing**: run `workon init` or check installation
+- **Never proceed to the next workflow step if the current step fails**
 
 ## Workflow: Creating a PR
 
@@ -108,7 +117,7 @@ Only pass the sections you want to change. Use `"-"` to read a section from stdi
 In auto mode, CI fix is a loop with a retry limit:
 
 1. `workon ci-status` — if green, move on
-2. If red: `workon ci-failure` → diagnose → fix → `workon pr-push --yes`
+2. If red: `workon ci-failure` → diagnose → fix → **run tests locally to verify fix** → `workon pr-push --yes`
 3. Wait for CI, repeat up to **3 attempts**
 4. After 3 failures, **stop and report to user** with the failure details
 
@@ -138,7 +147,8 @@ In auto mode, review feedback is addressed autonomously unless the rework is lar
 1. `workon pr-review --json` — parse all comments
 2. For each comment: fix code or reply with explanation
 3. **Scope check**: if addressing feedback requires > 20 lines of new/changed code, **stop and report to user** — the reviewer may be requesting a design change
-4. Push: `workon pr-push --yes`
+4. **Run tests locally to verify fix** before pushing
+5. Push: `workon pr-push --yes`
 
 ## Workflow: Concurrent CI + Review
 

@@ -7,6 +7,8 @@ allowed-tools: Bash(workon:*), Bash(git:*), Read
 
 # Workon Flow
 
+> **Note**: workon-flow and workon-delivery are companion skills. Flow handles ticket discovery through implementation; Delivery handles the PR lifecycle through merge. They hand off to each other at defined boundaries.
+
 Orchestrate the full pre-coding workflow: discover tickets, validate readiness, start work in the correct repo, and manage cross-platform subtask routing.
 
 ## Current Workflow State
@@ -41,7 +43,6 @@ Orchestrate the full pre-coding workflow: discover tickets, validate readiness, 
 | `workon context --json` | Structured workflow context |
 | `workon agent --once` | Single poll for new tasks, validates and comments |
 | `workon init` | Initialize configuration file |
-| `workon cleanup --yes` | Switch to base branch, pull, delete feature branch |
 | `workon worktree add <id>` | Create worktree for background agent work |
 | `workon worktree list [--json]` | Show all worktrees with pipeline status |
 | `workon worktree remove <id> [--keep]` | Remove worktree + branch |
@@ -50,6 +51,14 @@ Orchestrate the full pre-coding workflow: discover tickets, validate readiness, 
 | `workon start <id> --worktree` | Sugar: create worktree, print path |
 
 See `commands-reference.md` for detailed flag reference.
+
+## Error Handling
+
+When a CLI command fails:
+- **Network/API errors**: retry once, then report to user
+- **Invalid ticket ID or permissions**: report to user immediately
+- **CLI not found or config missing**: run `workon init` or check installation
+- **Never proceed to the next workflow step if the current step fails**
 
 ## Workflow: Starting Work on a Ticket
 
@@ -206,7 +215,8 @@ workon subtasks <id> --json
 **Auto-eligible if ALL of these are true:**
 - `ready: true` from deep validation
 - No semantic findings with category `coverage-gap`, `contract-mismatch`, or `thin-subtask`
-- No subtasks (single-repo ticket) — cross-repo requires guided mode
+- No subtasks (single-repo ticket) — parent-level cross-repo orchestration requires guided mode
+- Individual subtasks within a cross-repo ticket CAN run in auto mode if they independently pass auto-eligibility checks
 - Acceptance criteria are concrete and testable (not vague like "improve performance")
 - No open questions or ambiguity flagged by `--deep`
 
@@ -251,7 +261,7 @@ Once assessed as auto-eligible, run this pipeline without pausing for confirmati
 - **Max 3 CI fix attempts** — after 3 failures, stop and report to user
 - **Review changes > 20 lines of rework** — if a reviewer requests large changes, stop and consult user
 - **Scope creep detection** — if implementation requires changes outside what the ticket describes, stop
-- **Test failures after implementation** — if tests you didn't write are failing, stop and report
+- **Test failures in unmodified code** — if tests you didn't write or modify are failing (flaky tests, environment issues), stop and report to user
 - **Merge is always human-gated** — never auto-merge
 
 ### Resuming Auto Mode
