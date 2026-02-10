@@ -17,6 +17,13 @@ import * as claude from '../services/claude.js';
 import { parseSemanticFindings } from './validate.js';
 import type { SemanticFinding, HierarchyTree } from '../types.js';
 
+/**
+ * Strip common AI preamble lines from generated descriptions.
+ */
+function stripAIPreamble(text: string): string {
+  return text.replace(/^(?:here is|here's|below is)[^\n]*(?:description|version|ticket)[^\n]*\n+/i, '').trim();
+}
+
 const ANALYSIS_PROMPT = `You are a senior engineering manager reviewing a ticket before it is assigned.
 Analyze for quality issues that could cause confusion, wasted effort, or incorrect implementation.
 
@@ -43,7 +50,7 @@ Keep the description concise. Ensure every acceptance criterion is specific and 
 FINDINGS TO ADDRESS:
 {findings}
 
-Return ONLY the improved description, no preamble or explanation.`;
+Return ONLY the improved description. Do NOT include any preamble like "Here is the improved description" or explanation. Start directly with the description content.`;
 
 const HIERARCHY_IMPROVE_PROMPT = `You are improving a subtask description for a cross-platform feature.
 Use the HIERARCHY CONTEXT to:
@@ -58,7 +65,7 @@ HIERARCHY CONTEXT:
 FINDINGS TO ADDRESS:
 {findings}
 
-Return ONLY the improved description, no preamble or explanation.`;
+Return ONLY the improved description. Do NOT include any preamble like "Here is the improved description" or explanation. Start directly with the description content.`;
 
 const HIERARCHY_ANALYSIS_PROMPT = `You are a senior engineering manager reviewing a cross-platform feature.
 You are given a PARENT ticket and its platform SUBTASKS.
@@ -348,7 +355,7 @@ async function deepReviewFlow(
       prompt = IMPROVE_PROMPT.replace('{findings}', findingsText);
     }
 
-    improvedDescription = await claude.generateWithContext(prompt, description);
+    improvedDescription = stripAIPreamble(await claude.generateWithContext(prompt, description));
     improveSpinner.succeed('Improved description generated');
   } catch (error) {
     improveSpinner.fail('Failed to generate improvement');
@@ -469,50 +476,93 @@ async function parentLevelReviewFlow(
     }
   }
 
-  // For each subtask with findings, offer to improve
-  for (const sub of tree.subtasks) {
+  // Identify subtasks with findings
+  const subtasksWithFindings = tree.subtasks.filter(sub => {
     const subFindings = findingsBySubtask.get(sub.id);
-    if (!subFindings || subFindings.length === 0) continue;
+    return subFindings && subFindings.length > 0;
+  });
 
-    console.log(chalk.bold(`\n--- ${sub.name} (${sub.id}) ---`));
-    console.log(`${subFindings.length} finding(s)\n`);
+  if (options.yes) {
+    // Non-interactive: review all subtasks in parallel
+    console.log(chalk.bold(`\nReviewing ${subtasksWithFindings.length} subtask(s) in parallel...\n`));
 
-    const shouldImprove = options.yes || await confirm({
-      message: `Improve this subtask?`,
-      default: true,
-    });
+    const reviewResults = await Promise.all(subtasksWithFindings.map(async sub => {
+      const subFindings = findingsBySubtask.get(sub.id)!;
+      const originalDescription = (sub.text_content || sub.description || '').trim();
+      if (!originalDescription) return { sub, improved: null };
 
-    if (!shouldImprove) continue;
+      const filePath = getTicketFilePath(sub.id);
+      const improved = await deepReviewFlow(
+        sub.name,
+        originalDescription,
+        filePath,
+        options,
+        tree,
+      );
+      return { sub, improved, originalDescription };
+    }));
 
-    const originalDescription = (sub.text_content || sub.description || '').trim();
-    if (!originalDescription) {
-      showWarning('No description to improve — skipping');
-      continue;
-    }
-
-    const filePath = getTicketFilePath(sub.id);
-    const improved = await deepReviewFlow(
-      sub.name,
-      originalDescription,
-      filePath,
-      options,
-      tree,
+    // Push updates in parallel
+    const updates = reviewResults.filter(
+      r => r.improved !== null && r.improved !== r.originalDescription
     );
-
-    if (improved !== null && improved !== originalDescription) {
-      const shouldPush = options.yes || await confirm({
-        message: `Push improved description to ClickUp for ${sub.id}?`,
-        default: false,
-      });
-
-      if (shouldPush) {
+    if (updates.length > 0) {
+      await Promise.all(updates.map(async ({ sub, improved }) => {
         const updateSpinner = createSpinner(`Updating ${sub.id}...`).start();
         try {
-          await clickup.updateTask(sub.id, { markdown_description: improved });
+          await clickup.updateTask(sub.id, { markdown_description: improved! });
           updateSpinner.succeed(`Updated ${sub.id} in ClickUp`);
         } catch (error) {
           updateSpinner.fail(`Failed to update ${sub.id}`);
           console.error(chalk.red(error));
+        }
+      }));
+    }
+  } else {
+    // Interactive: review subtasks sequentially (user needs to triage each)
+    for (const sub of subtasksWithFindings) {
+      const subFindings = findingsBySubtask.get(sub.id)!;
+
+      console.log(chalk.bold(`\n--- ${sub.name} (${sub.id}) ---`));
+      console.log(`${subFindings.length} finding(s)\n`);
+
+      const shouldImprove = await confirm({
+        message: `Improve this subtask?`,
+        default: true,
+      });
+
+      if (!shouldImprove) continue;
+
+      const originalDescription = (sub.text_content || sub.description || '').trim();
+      if (!originalDescription) {
+        showWarning('No description to improve — skipping');
+        continue;
+      }
+
+      const filePath = getTicketFilePath(sub.id);
+      const improved = await deepReviewFlow(
+        sub.name,
+        originalDescription,
+        filePath,
+        options,
+        tree,
+      );
+
+      if (improved !== null && improved !== originalDescription) {
+        const shouldPush = await confirm({
+          message: `Push improved description to ClickUp for ${sub.id}?`,
+          default: false,
+        });
+
+        if (shouldPush) {
+          const updateSpinner = createSpinner(`Updating ${sub.id}...`).start();
+          try {
+            await clickup.updateTask(sub.id, { markdown_description: improved });
+            updateSpinner.succeed(`Updated ${sub.id} in ClickUp`);
+          } catch (error) {
+            updateSpinner.fail(`Failed to update ${sub.id}`);
+            console.error(chalk.red(error));
+          }
         }
       }
     }

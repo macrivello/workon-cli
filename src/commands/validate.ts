@@ -102,49 +102,56 @@ export async function validateCommand(ticketIdArg?: string, options: ValidateCom
 
     const result = validateTicket(task, config, subtasks.length > 0);
 
-    // Run semantic analysis if --deep
-    if (options.deep) {
-      const findings = await runSemanticValidation(task, options.json);
-      if (findings.length > 0) {
-        result.semanticFindings = findings;
-        // Also append to warnings for backwards-compatible consumers
-        for (const f of findings) {
-          result.warnings.push(`[${f.category}] ${f.message}`);
-        }
+    // Run semantic analysis and hierarchy fetch in parallel when both are needed
+    const wantHierarchy = options.hierarchy;
+
+    // Launch parallel work
+    const semanticPromise = options.deep
+      ? runSemanticValidation(task, options.json)
+      : Promise.resolve([] as SemanticFinding[]);
+
+    const hierarchySpinner = wantHierarchy && !options.json
+      ? createSpinner('Fetching hierarchy...').start()
+      : null;
+    const hierarchyPromise = wantHierarchy
+      ? fetchHierarchyTree(clickup, task)
+      : Promise.resolve(null);
+
+    // Await both concurrently
+    const [semanticFindings, tree] = await Promise.all([semanticPromise, hierarchyPromise]);
+
+    // Apply semantic findings
+    if (semanticFindings.length > 0) {
+      result.semanticFindings = semanticFindings;
+      for (const f of semanticFindings) {
+        result.warnings.push(`[${f.category}] ${f.message}`);
       }
     }
 
-    // Hierarchy analysis: --hierarchy flag, or --deep on a parent with subtasks
-    const wantHierarchy = options.hierarchy || (options.deep && subtasks.length > 0);
-    if (wantHierarchy) {
-      const hierarchySpinner = options.json ? null : createSpinner('Fetching hierarchy...').start();
-      const tree = await fetchHierarchyTree(clickup, task);
+    // Apply hierarchy results
+    if (tree) {
+      if (hierarchySpinner) hierarchySpinner.succeed('Hierarchy loaded');
 
-      if (tree) {
-        if (hierarchySpinner) hierarchySpinner.succeed('Hierarchy loaded');
+      // Validate each subtask structurally
+      result.subtaskResults = tree.subtasks.map(sub => validateTicket(sub, config));
 
-        // Validate each subtask structurally
-        result.subtaskResults = tree.subtasks.map(sub => validateTicket(sub, config));
+      // Compute dependency order
+      result.dependencyOrder = inferDependencyOrder(tree);
 
-        // Compute dependency order
-        result.dependencyOrder = inferDependencyOrder(tree);
-
-        // Run AI hierarchy analysis if --deep or --hierarchy
-        if (options.deep || options.hierarchy) {
-          const hierarchyFindings = await runHierarchyValidation(tree, options.json);
-          if (hierarchyFindings.length > 0) {
-            result.hierarchyFindings = hierarchyFindings;
-            // Append hierarchy warnings for backward compat
-            for (const f of hierarchyFindings) {
-              if (f.severity === 'warning') {
-                result.warnings.push(`[${f.category}] ${f.message}`);
-              }
+      // Run AI hierarchy analysis
+      if (options.deep || options.hierarchy) {
+        const hierarchyFindings = await runHierarchyValidation(tree, options.json);
+        if (hierarchyFindings.length > 0) {
+          result.hierarchyFindings = hierarchyFindings;
+          for (const f of hierarchyFindings) {
+            if (f.severity === 'warning') {
+              result.warnings.push(`[${f.category}] ${f.message}`);
             }
           }
         }
-      } else {
-        if (hierarchySpinner) hierarchySpinner.stop();
       }
+    } else {
+      if (hierarchySpinner) hierarchySpinner.stop();
     }
 
     if (options.json) {
@@ -528,8 +535,8 @@ async function postValidationComments(
       console.error(`Failed to post hierarchy comment on ${ticketId}:`, error instanceof Error ? error.message : error);
     }
 
-    // Post targeted comments on individual subtasks
-    for (const [subId, findings] of byTicket) {
+    // Post targeted comments on individual subtasks in parallel
+    await Promise.all(Array.from(byTicket).map(async ([subId, findings]) => {
       const subLines = ['**Hierarchy Review:**', ''];
       for (const f of findings) {
         const icon = f.severity === 'warning' ? '⚠️' : '💡';
@@ -542,6 +549,6 @@ async function postValidationComments(
       } catch (error) {
         console.error(`Failed to post hierarchy comment on subtask ${subId}:`, error instanceof Error ? error.message : error);
       }
-    }
+    }));
   }
 }
