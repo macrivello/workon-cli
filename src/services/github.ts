@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import type { GitHubPr, GitHubPrStatus } from '../types.js';
+import type { GitHubPr, GitHubPrStatus, GitHubReview, GitHubReviewComment } from '../types.js';
 import { isDryRun, dryRunLog } from '../utils/dry-run.js';
 
 /**
@@ -169,6 +169,127 @@ export function updatePr(
 }
 
 /**
+ * Get the full "owner/repo" name for the current repository
+ */
+export function getRepoFullName(): string {
+  const data = ghSpawn<{ nameWithOwner: string }>(['repo', 'view', '--json', 'nameWithOwner']);
+  return data.nameWithOwner;
+}
+
+/**
+ * Get top-level reviews for a PR
+ */
+export function getPrReviews(prNumber: number): GitHubReview[] {
+  const data = ghSpawn<{
+    reviews: Array<{
+      author: { login: string };
+      state: string;
+      body: string;
+      submittedAt: string;
+    }>;
+  }>(['pr', 'view', String(prNumber), '--json', 'reviews']);
+
+  return (data.reviews || [])
+    .filter(r => r.state !== 'PENDING' && r.body.trim() !== '')
+    .map(r => ({
+      author: r.author.login,
+      state: r.state,
+      body: r.body,
+      submittedAt: r.submittedAt,
+    }));
+}
+
+/**
+ * Get inline review comments for a PR
+ */
+export function getPrReviewComments(prNumber: number): GitHubReviewComment[] {
+  const repoFullName = getRepoFullName();
+  const data = ghSpawn<Array<{
+    id: number;
+    user: { login: string };
+    body: string;
+    path: string;
+    line: number | null;
+    original_line: number | null;
+    created_at: string;
+    in_reply_to_id?: number;
+  }>>(['api', `repos/${repoFullName}/pulls/${prNumber}/comments`]);
+
+  return (data || []).map(c => ({
+    id: c.id,
+    author: c.user.login,
+    body: c.body,
+    path: c.path,
+    line: c.line ?? c.original_line,
+    createdAt: c.created_at,
+    inReplyToId: c.in_reply_to_id ?? null,
+  }));
+}
+
+/**
+ * Get the merge state of a PR: OPEN, CLOSED, or MERGED
+ */
+export function getPrState(prNumber: number): string {
+  const data = ghSpawn<{ state: string }>(['pr', 'view', String(prNumber), '--json', 'state']);
+  return data.state;
+}
+
+/**
+ * Merge a PR directly via gh CLI
+ */
+export function mergePr(prNumber: number, strategy: 'squash' | 'merge'): void {
+  if (isDryRun()) {
+    dryRunLog('github', `Would merge PR #${prNumber} with --${strategy}`);
+    return;
+  }
+  ghSpawnRaw(['pr', 'merge', String(prNumber), `--${strategy}`, '--delete-branch']);
+}
+
+/**
+ * Check if a PR is in draft state
+ */
+export function isPrDraft(prNumber: number): boolean {
+  const data = ghSpawn<{ isDraft: boolean }>(['pr', 'view', String(prNumber), '--json', 'isDraft']);
+  return data.isDraft;
+}
+
+/**
+ * Mark a draft PR as ready for review
+ */
+export function markPrReady(prNumber: number): void {
+  if (isDryRun()) {
+    dryRunLog('github', `Would mark PR #${prNumber} as ready for review`);
+    return;
+  }
+  ghSpawnRaw(['pr', 'ready', String(prNumber)]);
+}
+
+/**
+ * Reply to an inline review comment on a PR
+ */
+export function replyToReviewComment(prNumber: number, commentId: number, body: string): void {
+  if (isDryRun()) {
+    dryRunLog('github', `Would reply to comment #${commentId} on PR #${prNumber}`, { body });
+    return;
+  }
+  const repoFullName = getRepoFullName();
+  ghSpawn(['api', `repos/${repoFullName}/pulls/${prNumber}/comments/${commentId}/replies`, '-f', `body=${body}`]);
+}
+
+/**
+ * Re-request reviewers on a PR
+ */
+export function requestReviewers(prNumber: number, reviewers: string[]): void {
+  if (isDryRun()) {
+    dryRunLog('github', `Would re-request review on PR #${prNumber}`, { reviewers });
+    return;
+  }
+  ghSpawnRaw(['pr', 'edit', String(prNumber), '--add-reviewer', reviewers.join(',')]);
+}
+
+const VALID_BRANCH_NAME = /^[a-zA-Z0-9\/_\-\.]+$/;
+
+/**
  * Push current branch to origin
  */
 export function pushBranch(): void {
@@ -178,6 +299,10 @@ export function pushBranch(): void {
 
   if (currentBranch === 'main' || currentBranch === 'master') {
     throw new Error(`Safety check: refusing to push ${currentBranch} branch`);
+  }
+
+  if (!VALID_BRANCH_NAME.test(currentBranch)) {
+    throw new Error(`Invalid branch name: ${currentBranch}`);
   }
 
   if (isDryRun()) {

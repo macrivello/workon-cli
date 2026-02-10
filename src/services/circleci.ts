@@ -62,6 +62,8 @@ export function getProjectSlug(): string | null {
   }
 }
 
+const VALID_BRANCH_NAME = /^[a-zA-Z0-9\/_\-\.]+$/;
+
 /**
  * Get pipelines for a specific branch
  */
@@ -70,6 +72,9 @@ export async function getPipelinesForBranch(
   branch: string,
   token: string
 ): Promise<CircleCIPipeline[]> {
+  if (!VALID_BRANCH_NAME.test(branch)) {
+    throw new Error(`Invalid branch name: ${branch}`);
+  }
   const response = await circleciRequest<PaginatedResponse<CircleCIPipeline>>(
     `/project/${projectSlug}/pipeline?branch=${encodeURIComponent(branch)}`,
     token

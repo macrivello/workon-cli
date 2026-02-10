@@ -53,6 +53,17 @@ export function checkoutNewBranch(name: string): void {
 }
 
 /**
+ * Pull the current branch from origin
+ */
+export function pull(): void {
+  if (isDryRun()) {
+    dryRunLog('git', 'Would pull from origin');
+    return;
+  }
+  gitSpawn(['pull']);
+}
+
+/**
  * Checkout an existing branch
  */
 export function checkout(name: string): void {

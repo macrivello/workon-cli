@@ -1,6 +1,11 @@
 import chalk from 'chalk';
 import boxen from 'boxen';
 import ora, { Ora } from 'ora';
+import { writeFileSync, readFileSync, mkdirSync } from 'fs';
+import { spawn } from 'child_process';
+import { dirname } from 'path';
+import { createInterface } from 'readline';
+import { parse } from 'shell-quote';
 
 export function createSpinner(text: string): Ora {
   return ora({ text, color: 'cyan' });
@@ -30,6 +35,43 @@ export function showWarning(message: string): void {
 
 export function showInfo(message: string): void {
   console.log(chalk.blue(`ℹ ${message}`));
+}
+
+/**
+ * Write content to a file, open it in the user's editor, wait for Enter, read it back.
+ * Uses VISUAL env var (set from config.editor) or falls back to showing the path.
+ */
+export async function editExternally(content: string, filePath: string): Promise<string> {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, content, 'utf-8');
+
+  // Try to open in configured editor (non-blocking)
+  const editorCmd = process.env.VISUAL || process.env.EDITOR;
+  if (editorCmd) {
+    const parts = parse(editorCmd).filter((p): p is string => typeof p === 'string');
+    const cmd = parts[0];
+    // Filter out --wait since we handle waiting ourselves
+    const args = [...parts.slice(1).filter(a => a !== '--wait'), filePath];
+    spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
+    console.log(`\n  ${chalk.dim('Opened in')} ${chalk.cyan(cmd)}`);
+  } else {
+    console.log(`\n  ${chalk.dim('Edit this file:')} ${chalk.cyan(filePath)}`);
+  }
+
+  console.log(chalk.dim('  Press Enter when done editing.\n'));
+  await waitForEnter();
+
+  return readFileSync(filePath, 'utf-8');
+}
+
+function waitForEnter(): Promise<void> {
+  return new Promise(resolve => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('', () => {
+      rl.close();
+      resolve();
+    });
+  });
 }
 
 export function formatPrStatus(status: {

@@ -1,39 +1,36 @@
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { createClickUpClient } from '../services/clickup.js';
+import { extractTicketIdFromBranch } from '../utils/branch.js';
 import * as git from '../services/git.js';
 import { createSpinner, showSuccess } from '../utils/ui.js';
 import { isStdinPiped, readStdin } from '../utils/stdin.js';
 
-/**
- * Extract ticket ID from branch name
- * Expected format: username/{ticketid}/description
- */
-function extractTicketIdFromBranch(branch: string): string | null {
-  const parts = branch.split('/');
-  if (parts.length >= 2) {
-    return parts[1];
-  }
-  return null;
+export interface CommentCommandOptions {
+  ticket?: string;
 }
 
-export async function commentCommand(commentArg?: string): Promise<void> {
+export async function commentCommand(commentArg?: string, options: CommentCommandOptions = {}): Promise<void> {
   const config = loadConfig();
   const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
 
-  // Get ticket ID from current branch
-  if (!git.isGitRepo()) {
-    console.error(chalk.red('Not in a git repository.'));
-    process.exit(1);
-  }
-
-  const branch = git.currentBranch();
-  const ticketId = extractTicketIdFromBranch(branch);
+  // Resolve ticket ID: --ticket flag first, then branch extraction
+  let ticketId = options.ticket;
 
   if (!ticketId) {
-    console.error(chalk.red('Could not extract ticket ID from branch name.'));
-    console.error(chalk.yellow(`Expected format: ${config.git.branchPrefix}/{ticketid}/description`));
-    process.exit(1);
+    if (!git.isGitRepo()) {
+      console.error(chalk.red('Not in a git repository and no --ticket provided.'));
+      process.exit(1);
+    }
+
+    const branch = git.currentBranch();
+    ticketId = extractTicketIdFromBranch(branch) ?? undefined;
+
+    if (!ticketId) {
+      console.error(chalk.red('Could not extract ticket ID from branch name.'));
+      console.error(chalk.yellow('Use --ticket <id> to specify a ticket directly.'));
+      process.exit(1);
+    }
   }
 
   // Get comment text from argument or stdin

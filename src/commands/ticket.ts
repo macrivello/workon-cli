@@ -1,21 +1,16 @@
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { createClickUpClient } from '../services/clickup.js';
+import { extractTicketIdFromBranch } from '../utils/branch.js';
+import { fetchEnrichedTicket, renderMarkdown, renderJSON } from '../utils/ticket-file.js';
 import * as git from '../services/git.js';
 
-/**
- * Extract ticket ID from branch name
- * Expected format: username/{ticketid}/description
- */
-function extractTicketIdFromBranch(branch: string): string | null {
-  const parts = branch.split('/');
-  if (parts.length >= 2) {
-    return parts[1];
-  }
-  return null;
+export interface TicketCommandOptions {
+  json?: boolean;
+  markdown?: boolean;
 }
 
-export async function ticketCommand(ticketIdArg?: string): Promise<void> {
+export async function ticketCommand(ticketIdArg?: string, options?: TicketCommandOptions): Promise<void> {
   const config = loadConfig();
   const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
 
@@ -41,6 +36,19 @@ export async function ticketCommand(ticketIdArg?: string): Promise<void> {
   }
 
   try {
+    // Structured output modes fetch enriched data (comments + subtasks)
+    if (options?.json || options?.markdown) {
+      const enriched = await fetchEnrichedTicket(clickup, ticketId);
+
+      if (options.json) {
+        console.log(renderJSON(enriched));
+      } else {
+        console.log(renderMarkdown(enriched));
+      }
+      return;
+    }
+
+    // Default: human-readable console output
     const task = await clickup.getTask(ticketId);
 
     // Output ticket info in a format useful for Claude Code

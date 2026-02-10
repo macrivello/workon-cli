@@ -3,27 +3,54 @@ import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { isTicketId, generateBranchName } from '../utils/branch.js';
 import { findCurrentSprintByDate } from '../utils/sprint.js';
-import { createSpinner, showSuccess, showBox } from '../utils/ui.js';
+import { createSpinner, showSuccess, showWarning, showBox } from '../utils/ui.js';
 import { createClickUpClient } from '../services/clickup.js';
 import * as git from '../services/git.js';
 import * as claude from '../services/claude.js';
-import type { Config, ClickUpList, ClickUpCustomField } from '../types.js';
+import type { Config, ClickUpTask, ClickUpList, ClickUpCustomField } from '../types.js';
+import { resolveStatus, START_PATTERNS } from '../utils/ticket-status.js';
+import { validateTicket, validateCommand } from './validate.js';
+import { reviewCommand } from './review.js';
+import { getRepoForTask } from '../utils/platform.js';
 import hierarchyBrowser, { type BrowseItem } from '../prompts/hierarchy-browser.js';
 
-export async function startCommand(ticketIdArg?: string): Promise<void> {
+export async function startCommand(ticketIdArg?: string, options: { yes?: boolean; cwd?: string } = {}): Promise<void> {
+  // Change to specified directory if --cwd provided
+  if (options.cwd) {
+    try {
+      process.chdir(options.cwd);
+      console.log(chalk.dim(`Working directory: ${options.cwd}`));
+    } catch {
+      console.error(chalk.red(`Cannot access directory: ${options.cwd}`));
+      process.exit(1);
+    }
+  }
+
+  const config = loadConfig();
+  const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
+
+  // If ticket ID provided, resolve the repo from Platform field and cd there
+  if (ticketIdArg && isTicketId(ticketIdArg) && !git.isGitRepo()) {
+    const repoPath = await resolveRepoFromTicket(ticketIdArg, config, clickup);
+    if (repoPath) {
+      process.chdir(repoPath);
+      console.log(chalk.dim(`Working directory: ${repoPath}`));
+    } else {
+      console.error(chalk.red('Not in a git repository and could not resolve repo from ticket Platform field.'));
+      process.exit(1);
+    }
+  }
+
   // Verify we're in a git repo
   if (!git.isGitRepo()) {
     console.error(chalk.red('Not in a git repository.'));
     process.exit(1);
   }
 
-  const config = loadConfig();
-  const clickup = createClickUpClient(config.clickup.apiToken, config.clickup.workspaceId);
-
   // If ticket ID provided as argument, go straight to existing flow
   // (skip base branch check - startFromExisting handles already-on-branch case)
   if (ticketIdArg && isTicketId(ticketIdArg)) {
-    await startFromExisting(ticketIdArg, config, clickup);
+    await startFromExisting(ticketIdArg, config, clickup, options);
     return;
   }
 
@@ -55,17 +82,18 @@ export async function startCommand(ticketIdArg?: string): Promise<void> {
     await handleNewTicket(config, clickup);
   } else if (isTicketId(userInput)) {
     // Direct ticket ID
-    await startFromExisting(userInput.toLowerCase(), config, clickup);
+    await startFromExisting(userInput.toLowerCase(), config, clickup, options);
   } else {
     // Search term
-    await handleSearchAndSelect(userInput, config, clickup);
+    await handleSearchAndSelect(userInput, config, clickup, options);
   }
 }
 
 async function handleSearchAndSelect(
   searchTerm: string,
   config: Config,
-  clickup: ReturnType<typeof createClickUpClient>
+  clickup: ReturnType<typeof createClickUpClient>,
+  options: { yes?: boolean } = {}
 ): Promise<void> {
   const spinner = createSpinner('Searching...').start();
 
@@ -90,23 +118,56 @@ async function handleSearchAndSelect(
       })),
     });
 
-    await startFromExisting(ticketId, config, clickup);
+    await startFromExisting(ticketId, config, clickup, options);
   } catch (error) {
     spinner.stop();
     console.error(chalk.red('Search failed:'), error);
   }
 }
 
+async function resolveRepoFromTicket(
+  ticketId: string,
+  config: Config,
+  clickup: ReturnType<typeof createClickUpClient>,
+): Promise<string | null> {
+  try {
+    const task = await clickup.getTask(ticketId);
+    return getRepoForTask(task.custom_fields, config);
+  } catch {
+    return null;
+  }
+}
+
 async function startFromExisting(
   ticketId: string,
   config: Config,
-  clickup: ReturnType<typeof createClickUpClient>
+  clickup: ReturnType<typeof createClickUpClient>,
+  options: { yes?: boolean } = {}
 ): Promise<void> {
   const spinner = createSpinner('Fetching ticket...').start();
 
   try {
     const ticket = await clickup.getTask(ticketId);
     spinner.succeed(`Found: ${ticket.name}`);
+
+    // Validate ticket readiness (non-blocking, with semantic + hierarchy analysis if AI enabled)
+    const validation = await validateCommand(ticketId, { deep: config.ai.enabled, hierarchy: true });
+
+    // Offer to refine description if semantic or hierarchy findings exist
+    const hasFindings = (validation?.semanticFindings && validation.semanticFindings.length > 0)
+      || (validation?.hierarchyFindings && validation.hierarchyFindings.length > 0);
+    if (!options.yes && hasFindings) {
+      const message = validation?.hierarchyFindings?.length
+        ? 'Hierarchy issues found. Refine subtask descriptions before starting?'
+        : 'Refine ticket description before starting?';
+      const refine = await confirm({
+        message,
+        default: false,
+      });
+      if (refine) {
+        await reviewCommand(ticketId, { deep: true, hierarchy: true });
+      }
+    }
 
     const branchName = generateBranchName(config.git.branchPrefix, ticketId, ticket.name);
     const currentBranch = git.currentBranch();
@@ -115,11 +176,19 @@ async function startFromExisting(
     if (currentBranch === branchName) {
       console.log(chalk.green(`Already on branch: ${branchName}`));
       console.log(`  Ticket: ${chalk.blue(ticket.url)}`);
+      await updateTicketStatus(clickup, ticket, config);
       return;
     }
 
     // Check if branch exists
     if (git.branchExists(branchName)) {
+      if (options.yes) {
+        git.checkout(branchName);
+        await updateTicketStatus(clickup, ticket, config);
+        showSuccess(`Checked out branch: ${branchName}`);
+        return;
+      }
+
       const action = await select({
         message: `Branch ${chalk.cyan(branchName)} already exists.`,
         choices: [
@@ -132,6 +201,7 @@ async function startFromExisting(
       if (action === 'cancel') return;
       if (action === 'checkout') {
         git.checkout(branchName);
+        await updateTicketStatus(clickup, ticket, config);
         showSuccess(`Checked out branch: ${branchName}`);
         return;
       }
@@ -140,12 +210,30 @@ async function startFromExisting(
 
     git.checkoutNewBranch(branchName);
 
+    await updateTicketStatus(clickup, ticket, config);
+
     console.log('');
     showSuccess(`Created branch: ${chalk.cyan(branchName)}`);
     console.log(`  Ticket: ${chalk.blue(ticket.url)}`);
   } catch (error) {
     spinner.fail('Failed to fetch ticket');
     console.error(chalk.red(error));
+  }
+}
+
+async function updateTicketStatus(
+  clickup: ReturnType<typeof createClickUpClient>,
+  ticket: ClickUpTask,
+  config: Config,
+): Promise<void> {
+  try {
+    const status = await resolveStatus(clickup, ticket, config.clickup.defaults.statusOnStart, START_PATTERNS);
+    if (status && ticket.status.status.toLowerCase() !== status.toLowerCase()) {
+      await clickup.updateTask(ticket.id, { status });
+      showSuccess(`Ticket status → ${status.toUpperCase()}`);
+    }
+  } catch (error) {
+    showWarning(`Failed to update ticket status: ${error}`);
   }
 }
 
