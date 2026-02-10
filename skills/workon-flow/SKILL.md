@@ -42,6 +42,12 @@ Orchestrate the full pre-coding workflow: discover tickets, validate readiness, 
 | `workon agent --once` | Single poll for new tasks, validates and comments |
 | `workon init` | Initialize configuration file |
 | `workon cleanup --yes` | Switch to base branch, pull, delete feature branch |
+| `workon worktree add <id>` | Create worktree for background agent work |
+| `workon worktree list [--json]` | Show all worktrees with pipeline status |
+| `workon worktree remove <id> [--keep]` | Remove worktree + branch |
+| `workon worktree status [id] [--json]` | Detailed status of one or all worktrees |
+| `workon worktree update-status --stage X` | Update pipeline stage (for agents) |
+| `workon start <id> --worktree` | Sugar: create worktree, print path |
 
 See `commands-reference.md` for detailed flag reference.
 
@@ -255,6 +261,67 @@ If auto mode was interrupted (session break, blocker), on resume:
 workon context
 ```
 Check where the pipeline stopped and continue from that point. The `current/` files and PR state provide full recovery context.
+
+## Workflow: Background Development (Worktrees)
+
+Use git worktrees to run multiple subtasks in parallel within the same repo. Each worktree gets its own directory and branch, so background Claude agents can work independently while the main worktree stays free.
+
+```
+main worktree:  human works interactively (or idle)
+     ├── .worktrees/86b6ycnw1/:  background claude → auto-mode → PR
+     ├── .worktrees/86b8dq334/:  background claude → auto-mode → PR
+     └── (other repo):            background claude → another subtask
+```
+
+### Creating a worktree for a subtask
+
+```bash
+workon worktree add <subtask-id>
+```
+
+This fetches the ticket, creates a branch from the base branch, writes a `.workon-status.json` status file, and prints the worktree path as the last line of output.
+
+### Launching a background agent
+
+```bash
+claude --cwd $(workon worktree add <subtask-id> | tail -1) -p "workon auto <subtask-id>"
+```
+
+Or use `--worktree` on start:
+```bash
+claude --cwd $(workon start <subtask-id> --worktree | tail -1) -p "workon auto <subtask-id>"
+```
+
+### Agent status reporting
+
+Background agents should update their pipeline stage as they progress:
+```bash
+workon worktree update-status --stage planning
+workon worktree update-status --stage implementing
+workon worktree update-status --stage pr-created --pr-url <url> --pr-number <n>
+workon worktree update-status --stage blocked --blocked "CI timeout on flaky test"
+```
+
+Valid stages: `starting`, `planning`, `implementing`, `pr-created`, `ci-fixing`, `review-addressing`, `ready-to-merge`, `blocked`, `completed`.
+
+### Monitoring progress
+
+```bash
+workon worktree list          # Table of all worktrees with stage, ticket name, PR URL
+workon worktree status <id>   # Detailed status of one worktree
+workon context                # Includes "Background Work" section with all worktrees
+```
+
+### Cleanup
+
+Automatic after merge: `workon cleanup` inside a worktree removes the worktree and deletes the branch.
+
+Manual removal:
+```bash
+workon worktree remove <id>         # Remove worktree + branch (warns if not completed)
+workon worktree remove <id> --keep  # Remove worktree, keep branch for debugging
+workon worktree remove <id> -y      # Skip confirmation
+```
 
 ## Safety Rules
 

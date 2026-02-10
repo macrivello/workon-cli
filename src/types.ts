@@ -265,3 +265,35 @@ export interface ValidateResult {
   subtaskResults?: ValidateResult[];      // Per-subtask structural validation
   dependencyOrder?: string[][];            // Execution tiers — each tier is parallel, tiers are sequential
 }
+
+// Worktree types
+export type WorktreePipelineStage =
+  | 'starting' | 'planning' | 'implementing' | 'pr-created'
+  | 'ci-fixing' | 'review-addressing' | 'ready-to-merge'
+  | 'blocked' | 'completed';
+
+export interface WorktreeStatus {
+  ticketId: string;
+  ticketName: string;
+  branch: string;
+  stage: WorktreePipelineStage;
+  prUrl?: string;
+  prNumber?: number;
+  blockedReason?: string;
+  startedAt: string;       // ISO 8601
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorktreeEntry {
+  path: string;
+  head: string;
+  branch: string | null;   // null if detached HEAD
+  bare: boolean;
+}
+
+export interface WorktreeInfo extends WorktreeEntry {
+  ticketId: string | null;
+  status: WorktreeStatus | null;
+  isMain: boolean;
+}
